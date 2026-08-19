@@ -26,7 +26,7 @@ TPEX_DAILY = "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
 TWSE_DIVIDEND = "https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL"
 MIS_QUOTE = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (NCKU-CS-student-project)"}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 TIMEOUT = 25
 
 _session = requests.Session()
