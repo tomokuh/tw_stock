@@ -7,7 +7,7 @@ python scripts/run_close.py
 streamlit run twstock_app/app/main.py
 ```
 
-## 排程（兩次抓取做的是不同的事）
+## 排程
 
 ```cron
 30 11 * * 1-5   cd /path/tw_stock && python scripts/run_intraday.py   # 盤中快照 is_final=False
