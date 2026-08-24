@@ -3,7 +3,7 @@
 
 ```bash
 pip install -r requirements.txt
-python scripts/run_close.py          # 先跑一次，建立標的清單與當日資料
+python scripts/run_close.py          
 streamlit run twstock_app/app/main.py
 ```
 
@@ -13,9 +13,6 @@ streamlit run twstock_app/app/main.py
 30 11 * * 1-5   cd /path/tw_stock && python scripts/run_intraday.py   # 盤中快照 is_final=False
 0  19 * * 1-5   cd /path/tw_stock && python scripts/run_close.py      # 收盤定版 is_final=True，覆蓋 11:30
 ```
-
-寫入是 idempotent upsert（key = `stock_id, date`），重跑幾次都不會產生重複列。
-四色訊號只讀 `is_final=True` 的 K，盤中假訊號不會污染。
 
 ## 四色 K 線定義（config/settings.yaml 可調）
 
@@ -36,11 +33,6 @@ vol_ok   = volume > volume.shift(1) * vol_ratio      # 預設 1.30，可調 1.10
 | 前為藍 | 🟡 黃（若 red_px）／維持 🔵 |
 
 **紅與黑是訊號色，每一根都必須重新滿足條件，不會黏著。** 量能不足即降級為黃/藍。
-
-## 六種模式
-
-先在**日線**上還原權值，再 resample 成週/月（順序不可顛倒）。
-`{日, 週, 月} × {原始, 還原}` = 6 種，週/月不落地，即時算出。
 
 ## 目錄
 
