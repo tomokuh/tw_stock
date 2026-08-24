@@ -9,6 +9,11 @@
 - 日期一律取自資料本身，並會從指定日往回找「最近一個有資料的交易日」，
   避免遇到週末/假日/當日尚未更新時抓到空表。
 - 過濾權證/ETN/TDR，只留個股(4碼數字)與 ETF(00開頭)。
+
+TPEx 欄位對位（實測 www.tpex.org.tw dailyQuotes）：
+  x[0]代號 x[1]名稱 x[2]收盤 x[3]漲跌 x[4]開盤 x[5]最高 x[6]最低
+  x[7]均價 x[8]成交股數 x[9]成交金額 x[10]成交筆數 ...
+  ★ 成交量是 x[8]（成交股數），不是 x[7]（均價）
 """
 from __future__ import annotations
 
@@ -26,7 +31,7 @@ TPEX_DAILY = "https://www.tpex.org.tw/www/zh-tw/afterTrading/dailyQuotes"
 TWSE_DIVIDEND = "https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL"
 MIS_QUOTE = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp"
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+HEADERS = {"User-Agent": "Mozilla/5.0 (NCKU-CS-student-project)"}
 TIMEOUT = 25
 
 _session = requests.Session()
@@ -117,7 +122,11 @@ def _fetch_twse_one(ymd: str) -> pd.DataFrame | None:
 
 
 def _fetch_tpex_one(ymd: str) -> pd.DataFrame | None:
-    """抓某一天的上櫃個股。端點結構若有變動則回 None（不中斷上市）。"""
+    """抓某一天的上櫃個股。端點結構若有變動則回 None（不中斷上市）。
+
+    TPEx 欄位：x[2]收盤 x[4]開盤 x[5]最高 x[6]最低 x[7]均價 x[8]成交股數
+    ★ 成交量用 x[8]（成交股數），x[7] 是均價（曾誤用導致 volume 錯成 close/1000）
+    """
     try:
         r = _get_lenient(TPEX_DAILY, params={"response": "json", "date": ymd})
         j = r.json()
@@ -137,7 +146,7 @@ def _fetch_tpex_one(ymd: str) -> pd.DataFrame | None:
                 "open": _num(x[4]),
                 "high": _num(x[5]),
                 "low": _num(x[6]),
-                "volume": _num(x[7]) / 1000,
+                "volume": _num(x[8]) / 1000,   # ★ x[8]=成交股數（股）->張；不是 x[7] 均價
                 "market": "TPEx",
             })
         except (IndexError, TypeError):
@@ -154,7 +163,6 @@ def fetch_close_all(trade_date: date | None = None) -> pd.DataFrame:
     start = trade_date or date.today()
     tw = None
     used_ymd = None
-    # 上市：往回找最近有資料的交易日
     for ymd in _recent_weekdays(start):
         tw = _fetch_twse_one(ymd)
         if tw is not None:
@@ -166,7 +174,6 @@ def fetch_close_all(trade_date: date | None = None) -> pd.DataFrame:
     else:
         print("[warn] 上市當日資料抓不到（近 8 個交易日皆空）")
 
-    # 上櫃：用跟上市相同的交易日（對齊）
     if used_ymd:
         tp = _fetch_tpex_one(used_ymd)
         if tp is not None:
