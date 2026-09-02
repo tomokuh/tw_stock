@@ -1,7 +1,3 @@
-"""訊號掃描頁：掃選股池，列出今天剛出現買進/賣出訊號的股票。
-
-量能與價格條件跟隨 config/settings.yaml（紅黑各自獨立，與 K 線頁、回測頁一致）。
-"""
 from __future__ import annotations
 
 import sys
@@ -14,6 +10,8 @@ import streamlit as st
 
 from twstock_app.core import store
 from twstock_app.core.config import Settings
+from twstock_app.core.favorites import load_favorites
+from twstock_app.core.fav_signals import check_favorites
 from twstock_app.core.scan import scan_signals
 
 st.set_page_config(page_title="訊號掃描", layout="wide")
@@ -42,6 +40,31 @@ c1, c2 = st.columns([1, 3])
 with c1:
     pick = st.selectbox("掃描日期", all_dates[::-1], index=0,
                         format_func=lambda d: d.isoformat())
+
+# ========== 我的收藏訊號（頁面最上方） ==========
+favs = load_favorites()
+if favs:
+    inst = store.load_instruments()
+    fav_res = check_favorites(bars, inst, favs, S, pd.Timestamp(pick))
+    n_buy, n_sell = len(fav_res["buy"]), len(fav_res["sell"])
+
+    st.subheader("⭐ 我的收藏訊號")
+    if n_buy or n_sell:
+        if n_buy:
+            st.success(f"🔴 買入訊號 {n_buy} 檔（黑之後第一個紅，可進場）")
+            st.dataframe(fav_res["buy"], use_container_width=True, hide_index=True)
+        if n_sell:
+            st.error(f"⚫ 賣出訊號 {n_sell} 檔（紅之後第一個黑，可出場）")
+            st.dataframe(fav_res["sell"], use_container_width=True, hide_index=True)
+    else:
+        st.info(f"收藏股票在 {pick} 無新的進出場訊號")
+
+    with st.expander(f"收藏股票目前部位狀態（共 {len(favs)} 檔）"):
+        st.caption("依最近一次進出場訊號判斷目前該持有還是空手")
+        st.dataframe(fav_res["status"], use_container_width=True, hide_index=True)
+    st.divider()
+
+# ========== 全市場掃描 ==========
 res = run_scan(pd.Timestamp(pick).isoformat())
 
 fc = S.four_color

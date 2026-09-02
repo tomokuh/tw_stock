@@ -3,7 +3,8 @@
 對選股池內每一檔跑四色判定，抓出「最新一根剛轉入紅(買進)或黑(賣出)」的股票。
 只掃日線（訊號密度最合理）；週/月線訊號太稀疏，不適合每日掃描。
 
-回傳兩張表：買進清單、賣出清單，各含 代號 / 名稱 / 收盤 / 成交量 / 連續同色天數。
+回傳兩張表：買進清單、賣出清單，各含 代號 / 名稱 / 收盤 / 成交量 / 成交金額 / 連續同色天數。
+排序：依「成交金額（收盤×成交量）」由大到小 = 近似市值排序，權值股排前面。
 """
 from __future__ import annotations
 
@@ -60,15 +61,21 @@ def scan_signals(bars: pd.DataFrame, instruments: pd.DataFrame,
             if c == cur: streak += 1
             else: break
 
+        close_v = float(last["close"])
+        vol_v = float(last["volume"])
+        turnover = close_v * vol_v   # 成交金額（近似市值）
         row = {"代號": sid, "名稱": name_map.get(str(sid), ""),
-               "收盤": round(float(last["close"]), 2),
-               "成交量(張)": int(last["volume"]),
+               "收盤": round(close_v, 2),
+               "成交量(張)": int(vol_v),
+               "成交金額(千元)": int(turnover),   # 收盤(元)×量(張)≈千元為單位
                "連續天數": streak}
         if bool(sig.loc[as_of, "buy"]):
             buy_rows.append(row)
         elif bool(sig.loc[as_of, "sell"]):
             sell_rows.append(row)
 
-    buy = pd.DataFrame(buy_rows).sort_values("成交量(張)", ascending=False) if buy_rows else pd.DataFrame(columns=["代號","名稱","收盤","成交量(張)","連續天數"])
-    sell = pd.DataFrame(sell_rows).sort_values("成交量(張)", ascending=False) if sell_rows else pd.DataFrame(columns=["代號","名稱","收盤","成交量(張)","連續天數"])
+    cols = ["代號", "名稱", "收盤", "成交量(張)", "成交金額(千元)", "連續天數"]
+    # ★ 改為依成交金額（近似市值）由大到小排序
+    buy = pd.DataFrame(buy_rows).sort_values("成交金額(千元)", ascending=False) if buy_rows else pd.DataFrame(columns=cols)
+    sell = pd.DataFrame(sell_rows).sort_values("成交金額(千元)", ascending=False) if sell_rows else pd.DataFrame(columns=cols)
     return {"as_of": as_of, "buy": buy.reset_index(drop=True), "sell": sell.reset_index(drop=True)}

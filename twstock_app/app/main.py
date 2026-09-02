@@ -11,6 +11,8 @@ import streamlit as st
 from twstock_app.app.chart import build_chart
 from twstock_app.core import store
 from twstock_app.core.config import COLOR_HEX, Settings
+from twstock_app.core.favorites import (add_favorite, load_favorites,
+                                        remove_favorite)
 from twstock_app.core.four_color import four_color, signals
 from twstock_app.core.transform import add_ma, adjust_prices, resample_ohlcv
 
@@ -22,12 +24,29 @@ RANGE_DAYS = {"3 個月": 63, "6 個月": 126, "1 年": 252, "2 年": 504, "5 �
 # ---------------- sidebar ----------------
 with st.sidebar:
     st.header("查詢")
-    query = st.text_input("股票代號或名稱", "2330")   # 需求 2-2
+
+    # 收藏清單：下拉選單快速切換
+    favs = load_favorites()
+    if favs:
+        # 顯示成「代號 名稱」方便辨識
+        inst = store.load_instruments()
+        name_map = dict(zip(inst["stock_id"].astype(str), inst["name"])) if not inst.empty else {}
+        fav_labels = ["（不使用收藏）"] + [f"{s} {name_map.get(s, '')}".strip() for s in favs]
+        picked = st.selectbox("★ 我的收藏", fav_labels, index=0)
+        if picked != "（不使用收藏）":
+            # 從標籤取回代號（第一段）
+            st.session_state["query_from_fav"] = picked.split()[0]
+
+    # 查詢輸入框：預設值可被收藏選擇覆蓋
+    default_query = st.session_state.get("query_from_fav", "2330")
+    query = st.text_input("股票代號或名稱", default_query)
+    # 用過一次就清掉，避免卡住不能手動改
+    st.session_state.pop("query_from_fav", None)
 
     st.header("K 線設定")
     freq_label = st.radio("週期", ["日線", "週線", "月線"], horizontal=True)
     freq = {"日線": "daily", "週線": "weekly", "月線": "monthly"}[freq_label]
-    adjusted = st.toggle("還原權值", value=False)      # 需求 5：6 種模式
+    adjusted = st.toggle("還原權值", value=False)
     rng_label = st.selectbox("顯示區間", list(RANGE_DAYS), index=2)
     mode = st.selectbox(
         "K 線配色",
@@ -37,7 +56,7 @@ with st.sidebar:
                                "classic_rb": "傳統（紅/藍）"}[m],
     )
 
-    st.header("移動平均線")                             # 需求 4
+    st.header("移動平均線")
     ma_pool = getattr(S.ma, freq)
     price_ma = st.multiselect(
         f"價格均線（最多 {S.ma.price_max_lines} 條）", ma_pool,
@@ -91,7 +110,7 @@ if not stock_id:
     st.error(f"查無「{query}」")
     st.stop()
 
-raw = store.load_bars(stock_id, final_only=True)   # 需求 3(確認)：盤中 K 不進訊號
+raw = store.load_bars(stock_id, final_only=True)
 if raw.empty:
     st.warning("尚無資料。請先執行  python scripts/run_close.py")
     st.stop()
@@ -112,7 +131,23 @@ else:
 
 # ---------------- render ----------------
 name = store.load_instruments().query("stock_id == @stock_id")["name"]
-title = f"{stock_id} {name.iloc[0] if not name.empty else ''} — {freq_label}{'（還原權值）' if adjusted else ''}"
+name_str = name.iloc[0] if not name.empty else ""
+title = f"{stock_id} {name_str} — {freq_label}{'（還原權值）' if adjusted else ''}"
+
+fav_list = load_favorites()
+col_title, col_fav = st.columns([5, 1])
+with col_title:
+    st.subheader(title)
+with col_fav:
+    if stock_id in fav_list:
+        if st.button("★ 已收藏", help="點擊移除收藏"):
+            remove_favorite(stock_id)
+            st.rerun()
+    else:
+        if st.button("☆ 收藏", help="加入收藏"):
+            add_favorite(stock_id)
+            st.rerun()
+
 st.plotly_chart(
     build_chart(view, colors_v, price_ma, vol_ma, freq, mode, title),
     use_container_width=True,
