@@ -19,9 +19,16 @@ st.title("四色訊號掃描")
 
 S = Settings.load()
 
+# 四色設定的指紋：任一參數變了，快取就失效重算（避免改條件後掃描仍用舊快取）
+_fc = S.four_color
+_fc_key = (_fc.red_price_lookback, _fc.red_vol_lookback, _fc.red_vol_ratio,
+           _fc.black_price_lookback, _fc.black_vol_lookback, _fc.black_vol_ratio,
+           S.universe.min_close, S.universe.min_volume_lots, S.universe.volume_window)
+
 
 @st.cache_data(ttl=1800)
-def run_scan(as_of_str: str | None):
+def run_scan(as_of_str: str | None, fc_key: tuple):
+    """fc_key 只是拿來當快取指紋，改了設定就會重算。"""
     bars = store.load_all_bars()
     inst = store.load_instruments()
     if bars.empty:
@@ -65,7 +72,7 @@ if favs:
     st.divider()
 
 # ========== 全市場掃描 ==========
-res = run_scan(pd.Timestamp(pick).isoformat())
+res = run_scan(pd.Timestamp(pick).isoformat(), _fc_key)
 
 fc = S.four_color
 red_desc = (f"創 {fc.red_price_lookback} 日收盤新高 且 量 > 前 {fc.red_vol_lookback} 日均量 × {fc.red_vol_ratio:g}")
