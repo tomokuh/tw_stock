@@ -1,25 +1,14 @@
-"""四色策略回測引擎。
-
-策略：
-  標的池 = 每個交易日「成交金額 rolling 均值前 N 大」的股票（近似 0050 權值股，
-          逐日重算 = point-in-time，無前視偏差）
-  進場   = 標的在池內、四色首次轉紅（前一根非紅）→ 隔日開盤買入
-  出場   = 持有中的標的四色轉黑 → 隔日開盤賣出
-  部位   = 每筆固定 = 初始資金 × pct（預設 1%），可同時持有多檔
-  成本   = 買賣手續費 0.1425% + 賣出證交稅 0.3%
-
-對照基準 = 買進並持有 0050（同期間）。
-
-  - 訊號用當日收盤算，但成交在「隔日開盤」→ 不偷看未來
-  - 標的池逐日重算 → 不用未來的成分股名單
+"""四色策略回測引擎（四色用還原價）。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
+from . import store
+from .adjust_helper import adjust_all_bars
 from .config import FourColorConfig
 from .four_color import four_color
 
@@ -27,13 +16,13 @@ from .four_color import four_color
 @dataclass
 class BacktestConfig:
     initial_cash: float = 1_000_000
-    position_pct: float = 0.01          # [固定模式] 每筆佔初始資金比例
-    position_mode: str = "fixed"        # "fixed"=固定1% | "rotate"=滿倉輪動(做法C)
-    max_holdings: int = 20              # [輪動模式] 最多同時持有檔數
-    universe_size: int = 50             # 取成交金額前 N 大
-    universe_window: int = 60           # 成交金額 rolling 天數
-    fee_rate: float = 0.001425          # 手續費（買賣各收）
-    tax_rate: float = 0.003             # 證交稅（賣出收）
+    position_pct: float = 0.01
+    position_mode: str = "fixed"
+    max_holdings: int = 20
+    universe_size: int = 50
+    universe_window: int = 60
+    fee_rate: float = 0.001425
+    tax_rate: float = 0.003
     min_price: float = 6.0
     benchmark_id: str = "0050"
 
@@ -51,7 +40,7 @@ class Trade:
 
 
 def _auto_adjust(df: pd.DataFrame, jump_threshold: float = 0.35) -> pd.DataFrame:
-    """自動還原分割/大除息造成的價格跳空。"""
+    """備援：偵測分割/大除息跳空還原（除權息資料缺時用）。"""
     df = df.sort_index().copy()
     close = df["close"].values
     factor = np.ones(len(df))
@@ -67,16 +56,26 @@ def _auto_adjust(df: pd.DataFrame, jump_threshold: float = 0.35) -> pd.DataFrame
     return df
 
 
-def _build_panel(bars: pd.DataFrame, adjust: bool = True) -> dict[str, pd.DataFrame]:
-    """把長表拆成 {stock_id: 日線df(index=date)}，並自動還原分割/除息跳空。"""
+def _build_panel(bars: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    """把長表拆成 {stock_id: 還原價日線df(index=date)}。
+
+    先用除權息還原（adjust_all_bars）；若某檔無除權息資料，
+    再套 _auto_adjust 當備援（抓大跳空）。
+    """
+    div = store.load_all_dividends()
+    adj = adjust_all_bars(bars, div)   # 除權息還原（有資料的檔）
+
+    # 哪些股票有除權息資料（已被精確還原），其餘用備援
+    has_div = set(div["stock_id"].astype(str).unique()) if not div.empty else set()
+
     out = {}
-    for sid, g in bars.groupby("stock_id"):
+    for sid, g in adj.groupby("stock_id"):
         g = g.copy()
         g["date"] = pd.to_datetime(g["date"])
         g = g.set_index("date").sort_index()
-        if adjust:
-            g = _auto_adjust(g)
-        out[sid] = g
+        if str(sid) not in has_div:
+            g = _auto_adjust(g)   # 沒除權息資料 → 備援還原
+        out[str(sid)] = g
     return out
 
 
@@ -86,18 +85,15 @@ def run_backtest(bars: pd.DataFrame, bt: BacktestConfig,
     fc = fc or FourColorConfig()
     panel = _build_panel(bars)
 
-    # 全體交易日軸
     all_dates = pd.to_datetime(sorted(bars["date"].unique()))
     if start:
         all_dates = all_dates[all_dates >= pd.Timestamp(start)]
     if end:
         all_dates = all_dates[all_dates <= pd.Timestamp(end)]
 
-    # 暖機所需天數（六參數最大值）
     max_lb = max(fc.red_price_lookback, fc.red_vol_lookback,
                  fc.black_price_lookback, fc.black_vol_lookback)
 
-    # 預先算每檔的四色、成交金額均值
     colors, turnover = {}, {}
     for sid, df in panel.items():
         if len(df) < max_lb + 2:
@@ -107,20 +103,18 @@ def run_backtest(bars: pd.DataFrame, bt: BacktestConfig,
             bt.universe_window, min_periods=bt.universe_window // 2).mean()
 
     cash = bt.initial_cash
-    # 部位大小：固定模式=初始資金×pct；輪動模式=初始資金/最大檔數
     if bt.position_mode == "rotate":
         per_trade = bt.initial_cash / bt.max_holdings
         slot_limit = bt.max_holdings
     else:
         per_trade = bt.initial_cash * bt.position_pct
-        slot_limit = None   # 不限檔數（只受現金限制）
+        slot_limit = None
     holdings: dict[str, Trade] = {}
     closed: list[Trade] = []
     equity_curve = []
-    pending_buys, pending_sells = [], []   # 隔日開盤執行
+    pending_buys, pending_sells = [], []
 
     for i, d in enumerate(all_dates):
-        # === 1. 先執行昨天掛的單（今日開盤價）===
         for sid in pending_sells:
             if sid in holdings and d in panel[sid].index:
                 px = float(panel[sid].loc[d, "open"])
@@ -133,7 +127,6 @@ def run_backtest(bars: pd.DataFrame, bt: BacktestConfig,
                 cash += proceeds
                 closed.append(t)
         for sid in pending_buys:
-            # 輪動模式：滿檔就跳過（做法C：不排隊，忽略新訊號直到有空位）
             if slot_limit is not None and len(holdings) >= slot_limit:
                 break
             if sid not in holdings and d in panel[sid].index and cash >= per_trade:
@@ -145,7 +138,6 @@ def run_backtest(bars: pd.DataFrame, bt: BacktestConfig,
                 cash -= per_trade
         pending_buys, pending_sells = [], []
 
-        # === 2. 用「今日收盤」訊號，決定明天要買/賣 ===
         tvals = []
         for sid, tv in turnover.items():
             if d in tv.index and not np.isnan(tv.loc[d]):
@@ -167,7 +159,6 @@ def run_backtest(bars: pd.DataFrame, bt: BacktestConfig,
             elif sid not in holdings and sid in universe and cur == "red" and prev != "red":
                 pending_buys.append(sid)
 
-        # === 3. 記錄當日權益（現金 + 持倉市值，用收盤）===
         mv = 0.0
         for sid, t in holdings.items():
             if d in panel[sid].index:
@@ -176,7 +167,6 @@ def run_backtest(bars: pd.DataFrame, bt: BacktestConfig,
 
     eq = pd.Series(dict(equity_curve)).sort_index()
 
-    # === 基準：買進持有 0050 ===
     bench = None
     if bt.benchmark_id in panel:
         b = panel[bt.benchmark_id]

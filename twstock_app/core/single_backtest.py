@@ -3,12 +3,12 @@
 策略：
   進場 = 四色首次轉紅（前一根非紅）→ 隔日開盤「全押」買入
   出場 = 轉黑 → 隔日開盤全部賣出，回到現金
-  空手期間 = 純現金（0 報酬），等下一個紅訊號
+  空手期間 = 純現金，等下一個紅訊號
   成本 = 買賣手續費 + 賣出證交稅
+對照 = 同一檔買進持有（buy and hold），一樣用還原價。
 
-對照 = 同一檔第一天買進、抱到最後（buy and hold），一樣用還原價。
-
-還原：自動偵測分割/大除息跳空並修正（與組合回測同一套 _auto_adjust）。
+★ 還原：優先用除權息（store 的 dividends）精確還原；若無除權息資料，
+  退回 _auto_adjust（偵測大跳空）。四色與買賣都用還原價。
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from . import store
 from .config import FourColorConfig
 from .four_color import four_color
 
@@ -29,7 +30,7 @@ class SingleBTConfig:
 
 
 def _auto_adjust(df: pd.DataFrame, jump_threshold: float = 0.35) -> pd.DataFrame:
-    """還原分割/大除息跳空（跌>35% 或 漲>50% 視為除權息，往前接回）。"""
+    """備援：偵測分割/大除息跳空還原（無除權息資料時用）。"""
     df = df.sort_index().copy()
     close = df["close"].values
     factor = np.ones(len(df))
@@ -45,17 +46,64 @@ def _auto_adjust(df: pd.DataFrame, jump_threshold: float = 0.35) -> pd.DataFrame
     return df
 
 
+def _adjust_by_dividends(df: pd.DataFrame, dividends: pd.DataFrame) -> pd.DataFrame:
+    """用除權息精確還原（與 transform.adjust_prices 同公式）。df index=date。"""
+    df = df.sort_index().copy()
+    if dividends is None or dividends.empty:
+        return None   # 無除權息資料，交由呼叫端退回備援
+    div = dividends.copy()
+    div["date"] = pd.to_datetime(div["date"])
+    div = div.set_index("date").sort_index()
+
+    factor = np.ones(len(df))
+    closes = df["close"].values
+    for ex_date, row in div.iterrows():
+        pos_arr = np.where(df.index.values == np.datetime64(ex_date))[0]
+        if len(pos_arr) == 0:
+            continue
+        pos = int(pos_arr[0])
+        if pos == 0:
+            continue
+        prev_close = float(closes[pos - 1])
+        cash = float(row.get("cash_dividend", 0) or 0)
+        stock = float(row.get("stock_dividend", 0) or 0)
+        denom = prev_close * (1 + stock)
+        if denom <= 0:
+            continue
+        f = (prev_close - cash) / denom
+        factor[:pos] *= f
+    for col in ("open", "high", "low", "close"):
+        if col in df:
+            df[col] = (df[col].values * factor).round(4)
+    return df
+
+
 def run_single(daily: pd.DataFrame, cfg: SingleBTConfig,
                fc: FourColorConfig | None = None,
                start: str | None = None, end: str | None = None,
-               adjust: bool = True) -> dict:
-    """daily: 單一標的日線（index=date，欄位 open/high/low/close/volume）。"""
+               adjust: bool = True, stock_id: str | None = None) -> dict:
+    """daily: 單一標的日線（index=date，欄位 open/high/low/close/volume[/stock_id]）。
+    stock_id: 若給，用它查除權息精確還原；否則從 daily 的 stock_id 欄取。
+    """
     fc = fc or FourColorConfig()
     df = daily.copy()
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
+
+    # 取得 stock_id（優先參數，其次資料欄）
+    sid = stock_id
+    if sid is None and "stock_id" in df.columns and len(df):
+        sid = str(df["stock_id"].iloc[0])
+
     if adjust:
-        df = _auto_adjust(df)
+        adj = None
+        if sid is not None:
+            adj = _adjust_by_dividends(df, store.load_dividends(sid))
+        if adj is not None:
+            df = adj          # 除權息精確還原
+        else:
+            df = _auto_adjust(df)   # 備援
+
     if start:
         df = df[df.index >= pd.Timestamp(start)]
     if end:
@@ -81,10 +129,9 @@ def run_single(daily: pd.DataFrame, cfg: SingleBTConfig,
     entry_px = 0.0
     equity = []
     trades = []
-    pending = None   # "buy" / "sell"，隔日開盤執行
+    pending = None
 
     for i in range(len(df)):
-        # 1. 執行昨日掛單（今日開盤）
         if pending == "buy" and not in_pos:
             px = opens[i]
             if px > 0:
@@ -104,18 +151,14 @@ def run_single(daily: pd.DataFrame, cfg: SingleBTConfig,
             in_pos = False
         pending = None
 
-        # 2. 今日收盤訊號決定明日動作
         if not in_pos and buy_sig.iloc[i]:
             pending = "buy"
         elif in_pos and sell_sig.iloc[i]:
             pending = "sell"
 
-        # 3. 記錄權益（現金 + 持股市值）
         equity.append(cash + shares * closes[i])
 
     eq = pd.Series(equity, index=dates)
-
-    # buy and hold 基準：第一天全押、抱到最後（含成本）
     bh_shares = cfg.initial_cash / (closes[0] * (1 + cfg.fee_rate))
     bh = pd.Series(bh_shares * closes, index=dates)
 

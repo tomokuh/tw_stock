@@ -1,19 +1,4 @@
 """資料擷取層：官方 API。
-
-當日收盤 -> fetch_close_all()  : www.twse.com.tw / www.tpex.org.tw 當日端點
-                                （openapi.twse.com.tw 是隔日更新，不用於當日抓取）
-盤中快照 -> fetch_intraday()   : MIS 即時報價（含買進/賣出價）
-除權息   -> fetch_dividends()  : 供還原權值用
-
-要點：
-- 日期一律取自資料本身，並會從指定日往回找「最近一個有資料的交易日」，
-  避免遇到週末/假日/當日尚未更新時抓到空表。
-- 過濾權證/ETN/TDR，只留個股(4碼數字)與 ETF(00開頭)。
-
-TPEx 欄位對位（實測 www.tpex.org.tw dailyQuotes）：
-  x[0]代號 x[1]名稱 x[2]收盤 x[3]漲跌 x[4]開盤 x[5]最高 x[6]最低
-  x[7]均價 x[8]成交股數 x[9]成交金額 x[10]成交筆數 ...
-  ★ 成交量是 x[8]（成交股數），不是 x[7]（均價）
 """
 from __future__ import annotations
 
@@ -37,7 +22,6 @@ TIMEOUT = 25
 _session = requests.Session()
 _session.headers.update(HEADERS)
 
-# 只留個股與 ETF，濾掉權證/ETN/TDR
 _EQUITY_RE = re.compile(r"\d{4}")
 _ETF_RE = re.compile(r"00\d{2,4}")
 
@@ -72,7 +56,6 @@ def _get_lenient(url, *, params=None):
 
 
 def _recent_weekdays(from_date: date, n: int = 8) -> list[str]:
-    """從 from_date 往回取 n 個工作日（跳過六日），回傳 YYYYMMDD 字串。"""
     out = []
     d = from_date
     while len(out) < n:
@@ -83,7 +66,7 @@ def _recent_weekdays(from_date: date, n: int = 8) -> list[str]:
 
 
 def _fetch_twse_one(ymd: str) -> pd.DataFrame | None:
-    """抓某一天的上市個股。無資料回 None。"""
+    """抓某一天的上市個股。TWSE 端點吃 date=YYYYMMDD，可查歷史。無資料回 None。"""
     r = _get_lenient(TWSE_MI_INDEX,
                      params={"response": "json", "date": ymd, "type": "ALLBUT0999"})
     j = r.json()
@@ -122,16 +105,29 @@ def _fetch_twse_one(ymd: str) -> pd.DataFrame | None:
 
 
 def _fetch_tpex_one(ymd: str) -> pd.DataFrame | None:
-    """抓某一天的上櫃個股。端點結構若有變動則回 None（不中斷上市）。
+    """抓某一天的上櫃個股。吃歷史，一次全市場。
 
-    TPEx 欄位：x[2]收盤 x[4]開盤 x[5]最高 x[6]最低 x[7]均價 x[8]成交股數
-    ★ 成交量用 x[8]（成交股數），x[7] 是均價（曾誤用導致 volume 錯成 close/1000）
+    ★ 關鍵：dailyQuotes 的 date 參數要用「YYYY/MM/DD」帶斜線格式（西元）。
+      傳入的 ymd 是 YYYYMMDD，這裡轉成 YYYY/MM/DD 再送。
+      仍核對端點回報日期，不符回 None（防萬一污染）。
+
+    TPEx 欄位：x[2]收盤 x[4]開 x[5]高 x[6]低 x[7]均價 x[8]成交股數
+    成交量用 x[8]（成交股數），x[7] 是均價。
     """
+    # YYYYMMDD -> YYYY/MM/DD（dailyQuotes 需要帶斜線才吃歷史）
+    date_slash = f"{ymd[0:4]}/{ymd[4:6]}/{ymd[6:8]}"
     try:
-        r = _get_lenient(TPEX_DAILY, params={"response": "json", "date": ymd})
+        r = _get_lenient(TPEX_DAILY, params={"response": "json",
+                                             "date": date_slash, "type": "AL"})
         j = r.json()
     except Exception:
         return None
+
+    # 端點回報的實際日期（YYYYMMDD）；不等於要求日就拒絕（避免污染）
+    ep_date = str(j.get("date", "")).strip()
+    if ep_date and ep_date != ymd:
+        return None
+
     aa = j.get("aaData") or (j.get("tables", [{}])[0].get("data", []) if j.get("tables") else [])
     rows = []
     for x in aa:
@@ -146,7 +142,7 @@ def _fetch_tpex_one(ymd: str) -> pd.DataFrame | None:
                 "open": _num(x[4]),
                 "high": _num(x[5]),
                 "low": _num(x[6]),
-                "volume": _num(x[8]) / 1000,   # ★ x[8]=成交股數（股）->張；不是 x[7] 均價
+                "volume": _num(x[8]) / 1000,   # x[8]=成交股數（股）->張
                 "market": "TPEx",
             })
         except (IndexError, TypeError):
@@ -159,7 +155,11 @@ def _fetch_tpex_one(ymd: str) -> pd.DataFrame | None:
 
 
 def fetch_close_all(trade_date: date | None = None) -> pd.DataFrame:
-    """當日全市場日 OHLCV。會從指定日往回找最近一個有資料的交易日。"""
+    """全市場日 OHLCV。往回找最近一個有資料的交易日。
+
+    上市 TWSE、上櫃 TPEx dailyQuotes 都吃歷史（用對日期格式），
+    所以補當日或補過去日都可用，一天各一次請求。
+    """
     start = trade_date or date.today()
     tw = None
     used_ymd = None
@@ -174,12 +174,13 @@ def fetch_close_all(trade_date: date | None = None) -> pd.DataFrame:
     else:
         print("[warn] 上市當日資料抓不到（近 8 個交易日皆空）")
 
+    # 上櫃：用跟上市相同的交易日（dailyQuotes 吃歷史，補過去日也 OK）
     if used_ymd:
         tp = _fetch_tpex_one(used_ymd)
         if tp is not None:
             frames.append(tp)
         else:
-            print("[warn] 上櫃當日資料略過（端點結構可能變動，不影響上市）")
+            print(f"[warn] 上櫃 {used_ymd} 無資料或日期不符，略過")
 
     if not frames:
         return pd.DataFrame(columns=["stock_id", "name", "open", "high", "low",

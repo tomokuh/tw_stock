@@ -16,7 +16,6 @@ def _upsert(path: Path, new: pd.DataFrame, keys: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         old = pd.read_parquet(path)
-        # 新資料優先（19:00 的 is_final=True 會覆蓋 11:30 的 is_final=False）
         merged = pd.concat([old, new], ignore_index=True)
         merged = merged.drop_duplicates(subset=keys, keep="last")
     else:
@@ -54,6 +53,13 @@ def load_dividends(stock_id: str) -> pd.DataFrame:
     return df[df["stock_id"] == stock_id]
 
 
+def load_all_dividends() -> pd.DataFrame:
+    """讀全市場除權息（供掃描/回測一次還原用）。"""
+    if not DIVIDENDS.exists():
+        return pd.DataFrame(columns=["stock_id", "date", "cash_dividend", "stock_dividend"])
+    return pd.read_parquet(DIVIDENDS)
+
+
 def load_instruments() -> pd.DataFrame:
     if not INSTRUMENTS.exists():
         return pd.DataFrame(columns=["stock_id", "name", "market"])
@@ -61,11 +67,7 @@ def load_instruments() -> pd.DataFrame:
 
 
 def load_all_bars(final_only: bool = False) -> pd.DataFrame:
-    """讀取全市場所有 K 棒（長表），供訊號掃描用。
-
-    與 load_bars 不同：load_bars 只讀單一 stock_id，這個讀全部。
-    final_only=True 時排除盤中未定版的 K。
-    """
+    """讀取全市場所有 K 棒（長表），供訊號掃描用。"""
     if not BARS.exists():
         return pd.DataFrame()
     df = pd.read_parquet(BARS)

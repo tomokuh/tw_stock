@@ -25,7 +25,7 @@ with st.sidebar:
 
     st.header("回測參數")
     init_cash = st.number_input("初始資金", 100_000, 100_000_000, 1_000_000, step=100_000)
-    st.caption("訊號來時全押、轉黑全出，與買進持有曝險一致")
+    st.caption("訊號來時全押、轉黑全出，與買進持有曝險一致（皆用還原價）")
 
     plo, phi = S.four_color.ui_lookback_range
     rlo, rhi = S.four_color.ui_vol_ratio_range
@@ -67,7 +67,8 @@ if run:
     })
     bt = SingleBTConfig(initial_cash=init_cash, fee_rate=fee, tax_rate=tax)
     with st.spinner("回測中…"):
-        res = run_single(raw.set_index("date"), bt, fc, adjust=True)
+        # 傳 stock_id 讓引擎用除權息精確還原
+        res = run_single(raw.set_index("date"), bt, fc, adjust=True, stock_id=stock_id)
         summ = summarize_single(res)
 
     if not summ:
@@ -113,6 +114,5 @@ else:
 
 - 紅：突破前 N 日最高收盤 + 量 > 前 N 日平均量 × 倍數
 - 黑：跌破前 N 日最低收盤 + 量 > 前 N 日平均量 × 倍數（紅黑各自獨立）
-
-**怎麼看**：強勢上漲股，買進持有通常勝；震盪或轉弱股，四色擇時可能勝且回撤較小。
+- 還原：優先用除權息精確還原，四色與買賣皆用還原價。
 """)

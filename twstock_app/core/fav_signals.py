@@ -1,15 +1,19 @@
+"""收藏股票的進出場訊號檢查（四色用還原價，與 K 線頁完全一致）。
+"""
 from __future__ import annotations
 
 import pandas as pd
 
+from . import store
 from .config import Settings
 from .four_color import four_color
+from .transform import adjust_prices, resample_ohlcv
 
 
 def _entry_exit_points(colors: pd.Series) -> pd.DataFrame:
     """用持倉狀態機掃出買/賣點。回傳 DataFrame(index=date, action=buy/sell)。"""
     holding = False
-    actions = []  # (date, "buy"/"sell")
+    actions = []
     for d, c in colors.items():
         if not holding and c == "red":
             actions.append((d, "buy"))
@@ -19,15 +23,17 @@ def _entry_exit_points(colors: pd.Series) -> pd.DataFrame:
             holding = False
     if not actions:
         return pd.DataFrame(columns=["action"]).rename_axis("date")
-    df = pd.DataFrame(actions, columns=["date", "action"]).set_index("date")
-    return df
+    return pd.DataFrame(actions, columns=["date", "action"]).set_index("date")
 
 
 def check_favorites(bars: pd.DataFrame, instruments: pd.DataFrame,
                     favorites: list[str], settings: Settings | None = None,
                     as_of: pd.Timestamp | None = None) -> dict:
-    """回傳收藏股票中，as_of 當日是「買入點/賣出點」的清單，
-    以及每檔最近一次進出場狀態。"""
+    """回傳收藏股票中，as_of 當日是「買入點/賣出點」的清單，及每檔目前部位狀態。
+
+    還原方式與 K 線頁一致：load_bars -> adjust_prices -> resample(adjusted=True) -> four_color
+    （不使用傳入的 bars 來算四色，改用單檔重讀，確保與 K 線頁同一條資料流。）
+    """
     s = settings or Settings.load()
     name_map = dict(zip(instruments["stock_id"].astype(str), instruments["name"]))
     fc = s.four_color
@@ -36,29 +42,39 @@ def check_favorites(bars: pd.DataFrame, instruments: pd.DataFrame,
 
     if as_of is None:
         as_of = pd.to_datetime(bars["date"]).max()
-    as_of = pd.Timestamp(as_of)
+    as_of = pd.Timestamp(as_of).normalize()
 
     buy, sell, status = [], [], []
     for sid in favorites:
-        g = bars[bars["stock_id"] == sid].copy()
-        if g.empty:
+        raw = store.load_bars(sid, final_only=True)
+        if raw.empty:
             continue
-        g["date"] = pd.to_datetime(g["date"])
-        g = g.set_index("date").sort_index()
+
+        # ★ 與 K 線頁完全相同的還原資料流
+        daily = adjust_prices(raw, store.load_dividends(sid))
+        g = resample_ohlcv(daily, "daily", adjusted=True)   # 還原價 → 四色
+        g.index = pd.to_datetime(g.index).normalize()
+
         if len(g) < max_lb + 2 or as_of not in g.index:
             continue
 
         colors = four_color(g, fc)
-        pts = _entry_exit_points(colors.loc[:as_of])   # 只看到 as_of 為止
+        pts = _entry_exit_points(colors.loc[:as_of])
 
         cur_color = colors.loc[as_of]
-        last = g.loc[as_of]
+        # 顯示用原始收盤（對照市價）：用未還原的 raw
+        raw_idx = pd.to_datetime(raw["date"]).dt.normalize() if "date" in raw.columns else raw.index.normalize()
+        try:
+            disp_close = round(float(raw.set_index(raw_idx).loc[as_of, "close"]), 2) if "date" in raw.columns \
+                else round(float(g.loc[as_of, "close"]), 2)
+        except Exception:
+            disp_close = round(float(g.loc[as_of, "close"]), 2)
+
         base = {"代號": sid, "名稱": name_map.get(sid, ""),
-                "收盤": round(float(last["close"]), 2),
+                "收盤": disp_close,
                 "目前顏色": {"red": "紅", "yellow": "黃", "blue": "藍",
                             "black": "黑", "gray": "—"}.get(cur_color, cur_color)}
 
-        # as_of 當天是不是買/賣點
         if as_of in pts.index:
             act = pts.loc[as_of, "action"]
             if act == "buy":
@@ -66,7 +82,6 @@ def check_favorites(bars: pd.DataFrame, instruments: pd.DataFrame,
             elif act == "sell":
                 sell.append(base)
 
-        # 最近一次進出場（判斷現在該持有還是空手）
         if len(pts):
             last_act = pts.iloc[-1]["action"]
             last_date = pts.index[-1]

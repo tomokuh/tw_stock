@@ -25,28 +25,24 @@ RANGE_DAYS = {"3 個月": 63, "6 個月": 126, "1 年": 252, "2 年": 504, "5 �
 with st.sidebar:
     st.header("查詢")
 
-    # 收藏清單：下拉選單快速切換
     favs = load_favorites()
     if favs:
-        # 顯示成「代號 名稱」方便辨識
         inst = store.load_instruments()
         name_map = dict(zip(inst["stock_id"].astype(str), inst["name"])) if not inst.empty else {}
         fav_labels = ["（不使用收藏）"] + [f"{s} {name_map.get(s, '')}".strip() for s in favs]
         picked = st.selectbox("★ 我的收藏", fav_labels, index=0)
         if picked != "（不使用收藏）":
-            # 從標籤取回代號（第一段）
             st.session_state["query_from_fav"] = picked.split()[0]
 
-    # 查詢輸入框：預設值可被收藏選擇覆蓋
     default_query = st.session_state.get("query_from_fav", "2330")
     query = st.text_input("股票代號或名稱", default_query)
-    # 用過一次就清掉，避免卡住不能手動改
     st.session_state.pop("query_from_fav", None)
 
     st.header("K 線設定")
     freq_label = st.radio("週期", ["日線", "週線", "月線"], horizontal=True)
     freq = {"日線": "daily", "週線": "weekly", "月線": "monthly"}[freq_label]
-    adjusted = st.toggle("還原權值", value=False)
+    show_adjusted = st.toggle("顯示還原權值價", value=False,
+                              help="四色判斷一律用還原價；此開關只切換 K 線「顯示」原始價或還原價。")
     rng_label = st.selectbox("顯示區間", list(RANGE_DAYS), index=2)
     mode = st.selectbox(
         "K 線配色",
@@ -116,9 +112,13 @@ if raw.empty:
     st.stop()
 
 daily = adjust_prices(raw, store.load_dividends(stock_id))
-bars = resample_ohlcv(daily, freq, adjusted)
-colors = four_color(bars, cfg)
+
+# ★ 四色一律用還原價；K 線顯示依 show_adjusted 切換原始/還原
+bars_for_color = resample_ohlcv(daily, freq, adjusted=True)     # 還原價 → 四色判斷
+colors = four_color(bars_for_color, cfg)
 sig = signals(colors)
+
+bars = resample_ohlcv(daily, freq, adjusted=show_adjusted)      # 顯示用（原始或還原）
 bars = add_ma(bars, price_ma, vol_ma)
 
 n = RANGE_DAYS[rng_label]
@@ -132,7 +132,7 @@ else:
 # ---------------- render ----------------
 name = store.load_instruments().query("stock_id == @stock_id")["name"]
 name_str = name.iloc[0] if not name.empty else ""
-title = f"{stock_id} {name_str} — {freq_label}{'（還原權值）' if adjusted else ''}"
+title = f"{stock_id} {name_str} — {freq_label}{'（顯示還原價）' if show_adjusted else ''}"
 
 fav_list = load_favorites()
 col_title, col_fav = st.columns([5, 1])
